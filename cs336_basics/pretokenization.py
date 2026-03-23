@@ -100,21 +100,26 @@ def process_chunk(args):
 
 
 if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-f", "--filename", type=str, default="TinyStoriesV2-GPT4-train.txt")
+    parser.add_argument("-n", "--num-processes", type=int, default=8)
+    args = parser.parse_args()
     data_dir = "/scratch/shared/beegfs/piyush/datasets/text_data"
-    mode = "train"
 
-    filepath = f"{data_dir}/TinyStoriesV2-GPT4-{mode}.txt"
+    filepath = f"{data_dir}/{args.filename}"
+    assert os.path.exists(filepath), f"File {filepath} does not exist"
     print("Loading: ", filepath)
 
     # Find chunk boundaries
     with open(filepath, "rb") as f:
-        num_processes = 8
+        num_processes = args.num_processes
         boundaries = find_chunk_boundaries(f, num_processes, b"<|endoftext|>")
 
     # Each worker opens the file independently and reads only its chunk
     tasks = [(filepath, start, end) for start, end in zip(boundaries[:-1], boundaries[1:])]
 
-    with Pool(num_processes, initializer=init_worker) as pool:
+    with Pool(num_processes, initializer=init_worker, initargs=(args.num_processes,)) as pool:
         chunk_counts = pool.map(process_chunk, tasks)
 
     counts = Counter()
@@ -126,7 +131,7 @@ if __name__ == "__main__":
     sorted_counts = sorted(counts.items(), key=lambda x: x[1], reverse=True)
     print(sorted_counts[:20])
 
-    save_name = f"TinyStoriesV2-GPT4-{mode}-pretokenization_counts.json"
+    save_name = f"{args.filename.replace('.txt', '')}-pretokenization_counts.json"
     save_path = f"{data_dir}/{save_name}"
     with open(save_path, "w") as f:
         json.dump(counts, f)
