@@ -106,8 +106,9 @@ def train_bpe(
         vocab[new_ind] = vocab[max_pair[0]] + vocab[max_pair[1]]
 
     # Add special tokens to the vocabulary
-    for s in special_tokens:
-        vocab[len(vocab)] = s
+    n = len(vocab)
+    for j, s in enumerate(special_tokens):
+        vocab[n+j] = s.encode("utf-8")
 
     # TODO: fix compute compression ratio
     # NOTE: since we have removed special tokens, those do not contribute to the n.o. bytes
