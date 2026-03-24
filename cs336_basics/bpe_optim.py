@@ -5,6 +5,7 @@ from tqdm import tqdm
 from glob import glob
 import json
 from collections import Counter
+from collections import defaultdict
 from copy import deepcopy
 
 
@@ -97,6 +98,51 @@ def merge_optimized(indices, max_pair, new_ind, pair_counts):
     return _indices, pair_counts
 
 
+def _unique_pairs(k):
+    if len(k) < 2:
+        return set()
+    return set(zip(k, k[1:]))
+
+
+def merge_with_inverted_index(indices, max_pair, new_ind, pair_counts, pair_to_keys):
+    """
+    Merge only the keys known to contain max_pair using an inverted index:
+    pair -> set(keys that contain that pair at least once).
+    """
+    affected_keys = list(pair_to_keys.get(max_pair, set()))
+    if not affected_keys:
+        return indices, pair_counts, pair_to_keys
+
+    # max_pair has already been deleted from pair_counts in caller.
+    if max_pair in pair_to_keys:
+        del pair_to_keys[max_pair]
+
+    for old_k in affected_keys:
+        if old_k not in indices:
+            # Key may have been removed earlier due to collision with another merged key.
+            continue
+
+        v = indices.pop(old_k)
+
+        # Remove old key from inverted index entries.
+        for p in _unique_pairs(old_k):
+            if p in pair_to_keys:
+                pair_to_keys[p].discard(old_k)
+                if not pair_to_keys[p]:
+                    del pair_to_keys[p]
+
+        # Update pair counts and create merged key.
+        new_k, pair_counts, _ = process_item(old_k, v, max_pair, new_ind, pair_counts)
+        # indices is a plain dict (not Counter): += on a missing key raises KeyError.
+        indices[new_k] = indices.get(new_k, 0) + v
+
+        # Add new key to inverted index entries.
+        for p in _unique_pairs(new_k):
+            pair_to_keys[p].add(new_k)
+
+    return indices, pair_counts, pair_to_keys
+
+
 def merge_optimized_more(indices, max_pair, new_ind, pair_counts, n_jobs=16):
     from joblib import Parallel, delayed
     # Fix the set of 16 CPUs to use here
@@ -113,6 +159,7 @@ def train_bpe_optimized(
     input_path: str,
     vocab_size: int,
     special_tokens: list=['<|endoftext|>'],
+    use_inverted_index: bool = False,
 ):
 
     # Load the pre-tokenized counts
@@ -137,10 +184,14 @@ def train_bpe_optimized(
     # At the start, fill it with initial counts: [a, b] = count("a, b")
     # where a/b are in [0, 255].
     pair_counts = Counter()
+    pair_to_keys = defaultdict(set) if use_inverted_index else None
     for k, v in indices.items():
         if len(k) < 2:
             # Nothing to add
             continue
+        if use_inverted_index:
+            for p in _unique_pairs(k):
+                pair_to_keys[p].add(k)
         for j in range(len(k) - 1):
             pair_counts[tuple([k[j], k[j+1]])] += v
 
@@ -159,7 +210,12 @@ def train_bpe_optimized(
         vocab[new_ind] = vocab[max_pair[0]] + vocab[max_pair[1]]
 
         # Merge + update the count dict
-        indices, pair_counts = merge_optimized(indices, max_pair, new_ind, pair_counts)
+        if use_inverted_index:
+            indices, pair_counts, pair_to_keys = merge_with_inverted_index(
+                indices, max_pair, new_ind, pair_counts, pair_to_keys
+            )
+        else:
+            indices, pair_counts = merge_optimized(indices, max_pair, new_ind, pair_counts)
         # indices, pair_counts = merge_optimized_more(indices, max_pair, new_ind, pair_counts)
         # import ipdb; ipdb.set_trace()
         # {k: v for k, v in indices.items() if max_pair in zip(k, k[1:])}
@@ -185,6 +241,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("-f", "--filename", type=str, default="TinyStoriesV2-GPT4-train.txt")
     parser.add_argument("-m", "--num_merges", type=int, default=10000)
+    parser.add_argument("--use-inverted-index", action="store_true")
     args = parser.parse_args()
 
     # Load pre-tokenization counts
@@ -195,7 +252,10 @@ if __name__ == "__main__":
 
     # Test it out
     vocab, merges = train_bpe_optimized(
-        pretok_filepath, vocab_size=256+1+args.num_merges, special_tokens=['<|endoftext|>'],
+        pretok_filepath,
+        vocab_size=256+1+args.num_merges,
+        special_tokens=['<|endoftext|>'],
+        use_inverted_index=args.use_inverted_index,
     )
     
     # Sanity check

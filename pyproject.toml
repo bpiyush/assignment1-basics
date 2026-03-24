@@ -23,6 +23,7 @@ dependencies = [
     "ipdb>=0.13.13",
     "scalene>=2.2.1",
     "joblib>=1.5.3",
+    "termcolor>=3.3.0",
 ]
 
 [build-system]
