@@ -154,15 +154,21 @@ def train_bpe_optimized(
 
 
 if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-f", "--filename", type=str, default="TinyStoriesV2-GPT4-train.txt")
+    parser.add_argument("-m", "--num_merges", type=int, default=10000)
+    args = parser.parse_args()
 
     # Load pre-tokenization counts
     data_dir = "/scratch/shared/beegfs/piyush/datasets/text_data"
-    mode = "train"
-    pretok_filepath = f"{data_dir}/TinyStoriesV2-GPT4-{mode}-pretokenization_counts.json"
-    text_filepath = f"{data_dir}/TinyStoriesV2-GPT4-{mode}.txt"
+    pretok_filepath = f"{data_dir}/{args.filename.replace('.txt', '')}-pretokenization_counts.json"
+    text_filepath = f"{data_dir}/{args.filename}"
 
     # Test it out
-    vocab, merges = train_bpe_optimized(pretok_filepath, vocab_size=256+1+10000, special_tokens=['<|endoftext|>'])
+    vocab, merges = train_bpe_optimized(
+        pretok_filepath, vocab_size=256+1+args.num_merges, special_tokens=['<|endoftext|>'],
+    )
     
     # Sanity check
     i = np.argmax([len(vocab[i]) for i in vocab])
@@ -190,5 +196,5 @@ if __name__ == "__main__":
     
     # Save output
     output = dict(vocab=vocab, merges=merges)
-    np.savez(f"{data_dir}/TinyStoriesV2-GPT4-{mode}-bpe_optimized.npz", **output)
-    print("Saved output to: ", f"{data_dir}/TinyStoriesV2-GPT4-{mode}-bpe_optimized.npz")
+    np.savez(f"{data_dir}/{args.filename.replace('.txt', '')}-bpe_optimized.npz", **output)
+    print("Saved output to: ", f"{data_dir}/{args.filename.replace('.txt', '')}-bpe_optimized.npz")
