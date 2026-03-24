@@ -21,6 +21,8 @@ dependencies = [
     "ty>=0.0.1a16",
     "matplotlib>=3.10.8",
     "ipdb>=0.13.13",
+    "scalene>=2.2.1",
+    "joblib>=1.5.3",
 ]
 
 [build-system]

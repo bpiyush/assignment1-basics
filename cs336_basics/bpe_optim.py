@@ -33,54 +33,80 @@ def show_topk_dict_entries(d, k=20):
     pprint_list(sorted(d.items(), key=lambda x: x[1], reverse=True)[:k])
 
 
+def process_item(k, v, max_pair, new_ind, pair_counts):
+    result = []
+    i = 0
+    while i < len(k):
+        if i < len(k) - 1 and k[i] == max_pair[0] and k[i+1] == max_pair[1]:
+
+            # [..... k[i - 1], **k[i], k[i+1],** k[i+2], ...]
+            # 1. Replace **k[i], k[i+1]** with new_ind
+            # 2. Handle left counter
+            # 3. Handle right counter
+
+            # Replacement
+            result.append(new_ind)
+
+            # Left
+            if i - 1 >= 0:
+                # Decrement [k[i - 1], k[i]] by v
+                # assert (k[i - 1], k[i]) in pair_counts
+                # pair_counts[ tuple([k[i - 1], k[i]]) ] -= v
+                pair_counts[ (k[i - 1], k[i]) ] -= v
+                
+                if pair_counts[(k[i - 1], k[i])] <= 0:
+                    del pair_counts[(k[i - 1], k[i])]
+
+                # Increment [k[i - 1], new_ind] by v
+                # pair_counts[ tuple([k[i - 1], new_ind]) ] += v
+                pair_counts[ (k[i - 1], new_ind) ] += v
+
+            # Right
+            if i + 2 < len(k):
+                
+                # Decrement [k[i + 1], k[i + 2]] by v
+                # assert (k[i + 1], k[i + 2]) in pair_counts
+                # pair_counts[ tuple([k[i + 1], k[i + 2]]) ] -= v
+                pair_counts[ (k[i + 1], k[i + 2]) ] -= v
+                
+                if pair_counts[(k[i + 1], k[i + 2])] <= 0:
+                    del pair_counts[(k[i + 1], k[i + 2])]
+
+                # Increment [new_ind, k[i + 2]]
+                # pair_counts[ tuple([new_ind, k[i + 2]]) ] += v
+                pair_counts[ (new_ind, k[i + 2]) ] += v
+            
+            i += 2
+        else:
+            result.append(k[i])
+            i += 1
+    
+    return tuple(result), pair_counts, v
+
+
 def merge_optimized(indices, max_pair, new_ind, pair_counts):
     _indices = Counter()
     for k, v in indices.items():
-
-        result = []
-        i = 0
-        while i < len(k):
-            if i < len(k) - 1 and k[i] == max_pair[0] and k[i+1] == max_pair[1]:
-
-                # [..... k[i - 1], **k[i], k[i+1],** k[i+2], ...]
-                # 1. Replace **k[i], k[i+1]** with new_ind
-                # 2. Handle left counter
-                # 3. Handle right counter
-
-                # Replacement
-                result.append(new_ind)
-
-                # Left
-                if i - 1 >= 0:
-                    # Decrement [k[i - 1], k[i]] by v
-                    # assert (k[i - 1], k[i]) in pair_counts
-                    # pair_counts[ tuple([k[i - 1], k[i]]) ] -= v
-                    pair_counts[ (k[i - 1], k[i]) ] -= v
-
-                    # Increment [k[i - 1], new_ind] by v
-                    # pair_counts[ tuple([k[i - 1], new_ind]) ] += v
-                    pair_counts[ (k[i - 1], new_ind) ] += v
-
-                # Right
-                if i + 2 < len(k):
-                    
-                    # Decrement [k[i + 1], k[i + 2]] by v
-                    # assert (k[i + 1], k[i + 2]) in pair_counts
-                    # pair_counts[ tuple([k[i + 1], k[i + 2]]) ] -= v
-                    pair_counts[ (k[i + 1], k[i + 2]) ] -= v
-
-                    # Increment [new_ind, k[i + 2]]
-                    # pair_counts[ tuple([new_ind, k[i + 2]]) ] += v
-                    pair_counts[ (new_ind, k[i + 2]) ] += v
-                
-                i += 2
-            else:
-                result.append(k[i])
-                i += 1
         
-        _indices[tuple(result)] += v
+        if max_pair[0] not in k or max_pair[1] not in k:
+            _indices[k] += v
+            continue
 
+        result, pair_counts, _ = process_item(k, v, max_pair, new_ind, pair_counts)
+        _indices[result] += v
     return _indices, pair_counts
+
+
+def merge_optimized_more(indices, max_pair, new_ind, pair_counts, n_jobs=16):
+    from joblib import Parallel, delayed
+    # Fix the set of 16 CPUs to use here
+    os.sched_setaffinity(os.getpid(), set(list(range(n_jobs))))
+    results = Parallel(n_jobs=n_jobs)(delayed(process_item)(k, v, max_pair, new_ind, pair_counts) for k, v in indices.items())
+    _indices = Counter()
+    for result, pair_counts, v in results:
+        _indices[result] += v
+    return _indices, pair_counts
+
 
 
 def train_bpe_optimized(
@@ -134,6 +160,7 @@ def train_bpe_optimized(
 
         # Merge + update the count dict
         indices, pair_counts = merge_optimized(indices, max_pair, new_ind, pair_counts)
+        # indices, pair_counts = merge_optimized_more(indices, max_pair, new_ind, pair_counts)
         # import ipdb; ipdb.set_trace()
         # {k: v for k, v in indices.items() if max_pair in zip(k, k[1:])}
         # Only for debugging: checks if a particular triplet count matches
@@ -163,6 +190,7 @@ if __name__ == "__main__":
     # Load pre-tokenization counts
     data_dir = "/scratch/shared/beegfs/piyush/datasets/text_data"
     pretok_filepath = f"{data_dir}/{args.filename.replace('.txt', '')}-pretokenization_counts.json"
+    print("Loading pre-tokenization counts from: ", pretok_filepath)
     text_filepath = f"{data_dir}/{args.filename}"
 
     # Test it out
