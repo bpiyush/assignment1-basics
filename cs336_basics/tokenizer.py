@@ -1,3 +1,11 @@
+import os
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+from multiprocessing import Pool, cpu_count
+
 import numpy as np
 from abc import ABC
 from termcolor import colored
@@ -359,29 +367,79 @@ class Tokenizer(ABC):
 
 
 
+# if __name__ == "__main__":
+#     data_dir = "/scratch/shared/beegfs/piyush/datasets/text_data"
+#     train_dataset = "TinyStoriesV2-GPT4-train"
+#     eval_dataset = "TinyStoriesV2-GPT4-valid"
+#     # dataset = "owt_train"
+#     filepath = f"{data_dir}/{train_dataset}-bpe_optimized.npz"
+#     textpath = f"{data_dir}/{eval_dataset}.txt"
+    
+#     # Initialize tokenizer
+#     tokenizer = Tokenizer.from_file(filepath=filepath, special_tokens=['<|endoftext|>'])
+
+#     n_chunks = 4096
+#     iterable = iter_text_chunks(
+#         textpath,
+#         special_tokens=["<|endoftext|>"],
+#         num_boundaries=n_chunks,
+#     )
+#     ids = []
+#     for chunk in tqdm(iterable, desc="Processing chunks", total=n_chunks):
+#         ids.extend(tokenizer.encode(chunk, verbose=False))
+#     # Save ids
+#     print("Number of tokens: ", len(ids))
+#     ids = np.array(ids, dtype=np.uint16)
+#     save_path = f"{data_dir}/{eval_dataset}-tokenized.npz"
+#     np.savez(save_path, ids=ids)
+#     # np.load(save_path)['ids']
+
+
+def encode_chunk(chunk):
+    """Worker function — uses module-level tokenizer (fork-safe)."""
+    return tokenizer.encode(chunk, verbose=False)
+
+
 if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--train-dataset", type=str, default="TinyStoriesV2-GPT4-train")
+    parser.add_argument("--eval-dataset", type=str, default="TinyStoriesV2-GPT4-train")
+    parser.add_argument("--nw", type=int, default=16)
+    args = parser.parse_args()
+    train_dataset = args.train_dataset
+    eval_dataset = args.eval_dataset
+    
     data_dir = "/scratch/shared/beegfs/piyush/datasets/text_data"
-    train_dataset = "TinyStoriesV2-GPT4-train"
-    eval_dataset = "TinyStoriesV2-GPT4-valid"
-    # dataset = "owt_train"
+    # train_dataset = "TinyStoriesV2-GPT4-train"
+    # eval_dataset = "TinyStoriesV2-GPT4-train"
+    # train_dataset = "owt_train"
+    # eval_dataset = "owt_valid"
     filepath = f"{data_dir}/{train_dataset}-bpe_optimized.npz"
     textpath = f"{data_dir}/{eval_dataset}.txt"
-    
-    # Initialize tokenizer
+
+    # Module-level so forked workers inherit it
     tokenizer = Tokenizer.from_file(filepath=filepath, special_tokens=['<|endoftext|>'])
 
     n_chunks = 4096
-    iterable = iter_text_chunks(
-        textpath,
-        special_tokens=["<|endoftext|>"],
-        num_boundaries=n_chunks,
-    )
-    ids = []
-    for chunk in tqdm(iterable, desc="Processing chunks", total=n_chunks):
-        ids.extend(tokenizer.encode(chunk, verbose=False))
-    # Save ids
-    print("Number of tokens: ", len(ids))
+    chunks = list(tqdm(
+        iter_text_chunks(textpath, special_tokens=["<|endoftext|>"], num_boundaries=n_chunks),
+        desc="Reading chunks",
+        total=n_chunks,
+    ))
+
+    # n_workers = cpu_count()
+    n_workers = args.nw
+    with Pool(n_workers) as pool:
+        encoded = list(tqdm(
+            pool.imap(encode_chunk, chunks),
+            desc="Encoding",
+            total=len(chunks),
+        ))
+
+    ids = [tok for sublist in encoded for tok in sublist]
+    print("Number of tokens:", len(ids))
+
     ids = np.array(ids, dtype=np.uint16)
     save_path = f"{data_dir}/{eval_dataset}-tokenized.npz"
     np.savez(save_path, ids=ids)
-    # np.load(save_path)['ids']
