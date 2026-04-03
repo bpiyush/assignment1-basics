@@ -29,7 +29,10 @@ def run_linear(
         Float[Tensor, "... d_out"]: The transformed output of your linear module.
     """
 
-    raise NotImplementedError
+    from cs336_basics.model import Linear
+    linear = Linear(d_in, d_out)
+    linear.load_state_dict({"W": weights})
+    return linear(in_features)
 
 
 def run_embedding(
@@ -51,7 +54,10 @@ def run_embedding(
         Float[Tensor, "... d_model"]: Batch of embeddings returned by your Embedding layer.
     """
 
-    raise NotImplementedError
+    from cs336_basics.model import Embedding
+    embedding = Embedding(vocab_size, d_model)
+    embedding.load_state_dict({"E": weights})
+    return embedding(token_ids)
 
 
 def run_swiglu(
@@ -83,7 +89,11 @@ def run_swiglu(
     # swiglu.w1.weight.data = w1_weight
     # swiglu.w2.weight.data = w2_weight
     # swiglu.w3.weight.data = w3_weight
-    raise NotImplementedError
+    
+    from cs336_basics.model import FFNSwiGLU
+    swiglu = FFNSwiGLU(d_model, d_ff)
+    swiglu.load_state_dict({"W1.W": w1_weight, "W2.W": w2_weight, "W3.W": w3_weight})
+    return swiglu(in_features)
 
 
 def run_scaled_dot_product_attention(
@@ -104,7 +114,8 @@ def run_scaled_dot_product_attention(
     Returns:
         Float[Tensor, " ... queries d_v"]: Output of SDPA
     """
-    raise NotImplementedError
+    from cs336_basics.model import scaled_dot_product_attention
+    return scaled_dot_product_attention(Q, K, V, mask)
 
 
 def run_multihead_self_attention(
@@ -138,7 +149,19 @@ def run_multihead_self_attention(
         Float[Tensor, " ... sequence_length d_out"]: Tensor with the output of running your optimized, batched multi-headed attention
         implementation with the given QKV projection weights and input features.
     """
-    raise NotImplementedError
+    from cs336_basics.model import CausalMultiHeadSelfAttention
+    import einops
+    cmhsa = CausalMultiHeadSelfAttention(d_model, num_heads, use_rope=False)
+    
+    state_dict = {
+        "WQ.W": q_proj_weight,
+        "WK.W": k_proj_weight,
+        "WV.W": v_proj_weight,
+        "WO.W": o_proj_weight,
+    }
+    cmhsa.load_state_dict(state_dict)
+
+    return cmhsa(in_features)
 
 
 def run_multihead_self_attention_with_rope(
@@ -178,7 +201,19 @@ def run_multihead_self_attention_with_rope(
         Float[Tensor, " ... sequence_length d_out"]: Tensor with the output of running your optimized, batched multi-headed attention
         implementation with the given QKV projection weights and input features.
     """
-    raise NotImplementedError
+    from cs336_basics.model import CausalMultiHeadSelfAttention
+    import einops
+    cmhsa = CausalMultiHeadSelfAttention(d_model, num_heads, use_rope=True, max_seq_len=max_seq_len, theta=theta)
+    
+    state_dict = {
+        "WQ.W": q_proj_weight,
+        "WK.W": k_proj_weight,
+        "WV.W": v_proj_weight,
+        "WO.W": o_proj_weight,
+    }
+    cmhsa.load_state_dict(state_dict)
+
+    return cmhsa(in_features, token_positions)
 
 
 def run_rope(
@@ -200,7 +235,9 @@ def run_rope(
     Returns:
         Float[Tensor, " ... sequence_length d_k"]: Tensor with RoPEd input.
     """
-    raise NotImplementedError
+    from cs336_basics.model import RotaryPositionalEmbedding
+    rope = RotaryPositionalEmbedding(theta, d_k, max_seq_len)
+    return rope(in_query_or_key, token_positions)
 
 
 def run_transformer_block(
@@ -273,7 +310,28 @@ def run_transformer_block(
         Float[Tensor, "batch sequence_length d_model"] Tensor with the output of
         running the Transformer block on the input features while using RoPE.
     """
-    raise NotImplementedError
+    from cs336_basics.model import TransformerBlock
+    import einops
+    transformer_block = TransformerBlock(
+        d_model=d_model, num_heads=num_heads, d_ff=d_ff, max_seq_len=max_seq_len, theta=theta,
+    )
+    map_dict = {
+        "attn.q_proj.weight": "cmhsa.WQ.W",
+        "attn.k_proj.weight": "cmhsa.WK.W",
+        "attn.v_proj.weight": "cmhsa.WV.W",
+        "attn.output_proj.weight": "cmhsa.WO.W",
+        "ln1.weight": "rmsnorm1.g",
+        "ln2.weight": "rmsnorm2.g",
+        "ffn.w1.weight": "ffn.W1.W",
+        "ffn.w2.weight": "ffn.W2.W",
+        "ffn.w3.weight": "ffn.W3.W",
+    }
+    state_dict = {map_dict[k]: v for k, v in weights.items()}
+    transformer_block.load_state_dict(state_dict)
+    token_positions = torch.arange(in_features.shape[-2], device=in_features.device)
+    token_positions = einops.repeat(token_positions, "t -> b t", b=in_features.shape[0])
+    return transformer_block(in_features, token_positions)
+    
 
 
 def run_transformer_lm(
@@ -300,7 +358,7 @@ def run_transformer_lm(
         num_heads (int): Number of heads to use in multi-headed attention. `d_model` must be
             evenly divisible by `num_heads`.
         d_ff (int): Dimensionality of the feed-forward inner layer (section 3.3).
-        rope_theta (float): The RoPE $\Theta$ parameter.
+        rope_theta (float): The RoPE $Theta$ parameter.
         weights (dict[str, Tensor]):
             State dict of our reference implementation. {num_layers} refers to an
             integer between `0` and `num_layers - 1` (the layer index).
@@ -355,7 +413,39 @@ def run_transformer_lm(
         Float[Tensor, "batch_size sequence_length vocab_size"]: Tensor with the predicted unnormalized
         next-word distribution for each token.
     """
-    raise NotImplementedError
+    from cs336_basics.model import Transformer
+    import einops
+    transformer = Transformer(
+        vocab_size=vocab_size,
+        context_length=context_length,
+        num_layers=num_layers,
+        d_model=d_model,
+        d_ff=d_ff,
+        num_heads=num_heads,
+        theta=rope_theta,
+    )
+
+    map_dict = {
+        "token_embeddings.weight": "embedding.E"
+    }
+    for i in range(num_layers):
+        map_dict[f'layers.{i}.attn.q_proj.weight'] = f"blocks.{i}.cmhsa.WQ.W"
+        map_dict[f'layers.{i}.attn.k_proj.weight'] = f"blocks.{i}.cmhsa.WK.W"
+        map_dict[f'layers.{i}.attn.v_proj.weight'] = f"blocks.{i}.cmhsa.WV.W"
+        map_dict[f'layers.{i}.attn.output_proj.weight'] = f"blocks.{i}.cmhsa.WO.W"
+        map_dict[f"layers.{i}.ln1.weight"] = f"blocks.{i}.rmsnorm1.g"
+        map_dict[f"layers.{i}.ln2.weight"] = f"blocks.{i}.rmsnorm2.g"
+        map_dict[f"layers.{i}.ffn.w1.weight"] = f"blocks.{i}.ffn.W1.W"
+        map_dict[f"layers.{i}.ffn.w2.weight"] = f"blocks.{i}.ffn.W2.W"
+        map_dict[f"layers.{i}.ffn.w3.weight"] = f"blocks.{i}.ffn.W3.W"
+    map_dict['ln_final.weight'] = "rmsnorm_output.g"
+    map_dict["lm_head.weight"] = "lm_head.W"
+    state_dict = {map_dict[k]: v for k, v in weights.items()}
+    transformer.load_state_dict(state_dict, strict=True)
+
+    token_positions = torch.arange(in_indices.shape[-1], device=in_indices.device)
+    token_positions = einops.repeat(token_positions, "t -> b t", b=in_indices.shape[0])
+    return transformer(in_indices, token_positions)
 
 
 def run_rmsnorm(
@@ -378,7 +468,10 @@ def run_rmsnorm(
         Float[Tensor,"... d_model"]: Tensor of with the same shape as `in_features` with the output of running
         RMSNorm of the `in_features`.
     """
-    raise NotImplementedError
+    from cs336_basics.model import RMSNorm
+    rmsnorm = RMSNorm(d_model, eps)
+    rmsnorm.load_state_dict({"g": weights})
+    return rmsnorm(in_features)
 
 
 def run_silu(in_features: Float[Tensor, " ..."]) -> Float[Tensor, " ..."]:
@@ -431,7 +524,8 @@ def run_softmax(in_features: Float[Tensor, " ..."], dim: int) -> Float[Tensor, "
         Float[Tensor, "..."]: Tensor of with the same shape as `in_features` with the output of
         softmax normalizing the specified `dim`.
     """
-    raise NotImplementedError
+    from cs336_basics.model import softmax
+    return softmax(in_features, dim)
 
 
 def run_cross_entropy(
