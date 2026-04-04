@@ -9,6 +9,7 @@ from typing import Optional
 import math
 import cs336_basics.model as models
 from cs336_basics.tokenizer import Tokenizer
+import tqdm
 
 
 def cross_entropy(logits, targets):
@@ -109,8 +110,12 @@ def gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_norm: float,
     return total_norm
 
 
-def get_batch(data, batch_size, context_length, device):
-    ix = torch.randint(len(data) - context_length, (batch_size,))
+def get_batch(data, batch_size, context_length, device, deterministic=False):
+    if deterministic:
+        # Return the same batch every time
+        ix = torch.arange(0, context_length * batch_size, context_length)
+    else:
+        ix = torch.randint(len(data) - context_length, (batch_size,))
     x = torch.stack([torch.from_numpy((data[i:i+context_length]).astype(np.int64)) for i in ix])
     y = torch.stack([torch.from_numpy((data[i+1:i+1+context_length]).astype(np.int64)) for i in ix])
     if device == 'cuda':
@@ -271,101 +276,72 @@ if __name__ == "__main__":
     tokenizer = Tokenizer.from_file(filepath=args.tok_path, special_tokens=['<|endoftext|>'])
     
     # Inference: Test on a single batch
-    print_update("Testing inference on a single batch")
-    x, y = get_batch(
-        data_train, args.batch_size, args.context_length, device=device
-    )
-    token_positions = torch.arange(0, x.shape[1], device=x.device, dtype=x.dtype)
-    token_positions = einops.repeat(token_positions, "t -> b t", b=x.shape[0])
-    with torch.no_grad():
-        logits = model(x, token_positions)
-    loss = cross_entropy(
-        einops.rearrange(logits, "b t d -> (b t) d"),
-        einops.rearrange(y, "b t -> (b t)"),
-    )
-    print("Loss on a single batch: ", loss.cpu().detach().item())
+    test_single_batch = False
+    if test_single_batch:
+        print_update("Testing inference on a single batch")
+        x, y = get_batch(
+            data_train, args.batch_size, args.context_length, device=device
+        )
+        token_positions = torch.arange(0, x.shape[1], device=x.device, dtype=x.dtype)
+        token_positions = einops.repeat(token_positions, "t -> b t", b=x.shape[0])
+        with torch.no_grad():
+            logits = model(x, token_positions)
+        loss = cross_entropy(
+            einops.rearrange(logits, "b t d -> (b t) d"),
+            einops.rearrange(y, "b t -> (b t)"),
+        )
+        print("Loss on a single batch: ", loss.cpu().detach().item())
     
     # Generate sample text
-    print_update("Generating sample text")
-    prompt = "Hello! I am a language model "
-    token_ids = torch.tensor(tokenizer.encode(prompt))
-    token_ids = einops.repeat(token_ids, "t -> b t", b=5)
-    token_positions = torch.arange(0, token_ids.shape[1], device=token_ids.device)
-    token_positions = einops.repeat(token_positions, "t -> b t", b=token_ids.shape[0])
-    output = generate(
-        model,
-        token_ids,
-        token_positions,
-        max_new_tokens=64,
-        endoftext_index=tokenizer.encode(tokenizer.special_tokens[0])[0],
-        context_length=args.context_length,
-        softmax_temp=1.,
-        top_p=0.7,
-    )
-    print("\n\n".join([tokenizer.decode(o.tolist()) for o in output]))
-    import ipdb; ipdb.set_trace()
+    generate_sample_text = False
+    if generate_sample_text:
+        print_update("Generating sample text")
+        prompt = "Hello! I am a language model "
+        token_ids = torch.tensor(tokenizer.encode(prompt))
+        token_ids = einops.repeat(token_ids, "t -> b t", b=5)
+        token_positions = torch.arange(0, token_ids.shape[1], device=token_ids.device)
+        token_positions = einops.repeat(token_positions, "t -> b t", b=token_ids.shape[0])
+        output = generate(
+            model,
+            token_ids,
+            token_positions,
+            max_new_tokens=64,
+            endoftext_index=tokenizer.encode(tokenizer.special_tokens[0])[0],
+            context_length=args.context_length,
+            softmax_temp=1.,
+            top_p=0.7,
+        )
+        print("\n\n".join([tokenizer.decode(o.tolist()) for o in output]))
+        import ipdb; ipdb.set_trace()
+    
+    
+    # Define optimizer
+    optimizer = AdamW(model.parameters(), lr=6e-4, weight_decay=0.1, betas=(0.9, 0.95), eps=1e-8)
+    
+    # TODO
+    # 1. Overfit on a single (deterministic) batch: DONE.
+    
+    
+    # Training loop
+    print_update("Training loop")
+    n_iters = 100
+    pbar = tqdm.tqdm(range(n_iters), desc="Training", bar_format="{l_bar}{bar:20}{r_bar}")
+    for i in pbar:
+        optimizer.zero_grad()
+        
+        x, y = get_batch(data_train, args.batch_size, args.context_length, device, deterministic=True)
+        p = torch.arange(0, x.shape[1], device=x.device, dtype=x.dtype)
+        p = einops.repeat(p, "t -> b t", b=x.shape[0])
+        logits = model(x, p)
+        loss = cross_entropy(
+            einops.rearrange(logits, "b t d -> (b t) d"),
+            einops.rearrange(y, "b t -> (b t)"),
+        )
+        loss.backward()
+        
+        optimizer.step()
+        
+        pbar.set_postfix({"step": i, "loss": np.round(loss.item(), 5)})
+        
 
 
-    
-
-    pass
-    
-    # # Test batching
-    # x, y = get_batch(np.arange(1000), 4, 8, device="cpu")
-    # print(x.shape, y.shape)
-    # print(x)
-    # print(y)
-    # import ipdb; ipdb.set_trace()
-    
-    # # Test and plot compute_total_norm
-    # parameters_1 = [torch.nn.Parameter(torch.rand(4, 16)) for _ in range(10)]
-    # parameters_2 = [torch.nn.Parameter(torch.rand(4, 16)) for _ in range(10)]
-    
-    # loss = sum(p.sum() for p in parameters_1)
-    # loss.backward()
-    
-    # loss_2 = sum(p.sum() for p in parameters_2)
-    # loss_2.backward()
-
-    # # total_norm = compute_total_norm(parameters)
-    # # print("Total norm: ", total_norm)
-    
-    # # This will update the gradients in place.
-    # print(gradient_clipping(parameters_1, 1.0))
-    
-    # print(torch.nn.utils.clip_grad_norm_(parameters_2, 1.0))
-    # import ipdb; ipdb.set_trace()    
-
-    # # Test and plot lr scheduler
-    # t = np.arange(0, 1000)
-    # lr_min = 0.0001
-    # lr_max = 0.001
-    # iters_warmup = 100
-    # iters_cosine = 900
-    # lr = [cosine_learning_rate_schedule(x, lr_min, lr_max, iters_warmup, iters_cosine) for x in t]
-    
-    # fig, ax = plt.subplots(1, 1)
-    # ax.plot(t, lr)
-    # ax.grid(alpha=0.5)
-    # plt.savefig("lr.png")
-    # import ipdb; ipdb.set_trace()
-    
-    
-    # import einops
-    # B, T, V = 4, 16, 50257
-    # # logits = torch.randn((B, T, V))
-    # # logits = torch.zeros((B, T, V))
-    # logits = torch.rand((B, T, V))
-    # targets = torch.randint(0, V, (B, T))
-    # # loss_ = cross_entropy_(logits, targets)
-    # loss = cross_entropy(
-    #     einops.rearrange(logits, "b t v -> (b t) v"),
-    #     einops.rearrange(targets, "b t -> (b t)"),
-    # )
-    # print("Tester loss: ", loss.item())
-    # # print("Tester loss: ", loss_.item())
-    # print("Random loss: ", torch.log(torch.tensor([V])).item())
-    
-    # pplx = perplexity(logits, targets)
-    # print("Perplexity: ", pplx)
-    
