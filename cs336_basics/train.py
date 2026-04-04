@@ -75,7 +75,73 @@ class AdamW(torch.optim.Optimizer):
         return loss
 
 
+def cosine_learning_rate_schedule(t, lr_min, lr_max, iters_warmup, iters_cosine):
+    if t < iters_warmup:
+        lr = (t / iters_warmup) * lr_max
+    elif t >= iters_warmup and t <= iters_cosine:
+        angle = np.pi * (t - iters_warmup) / (iters_cosine - iters_warmup)
+        lr = lr_min + 0.5 * (1 + np.cos(angle)) * (lr_max - lr_min)
+    elif t > iters_cosine:
+        lr = lr_min
+    else:
+        raise ValueError
+    return lr
+
+
+def compute_total_norm(parameters: Iterable[torch.nn.Parameter]) -> float:
+    total_norm = 0.0
+    for p in parameters:
+        if p.grad is not None:
+            total_norm += p.grad.data.norm(2).item() ** 2
+    total_norm = total_norm ** 0.5
+    return total_norm
+
+
+def gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_norm: float, eps: float = 1e-8) -> None:
+    total_norm = compute_total_norm(parameters)
+    if total_norm > max_norm:
+        for p in parameters:
+            if p.grad is not None:
+                p.grad.data = p.grad.data * min(1.0, max_norm / (total_norm + eps))
+    return total_norm
+
+
 if __name__ == "__main__":
+    
+    # Test and plot compute_total_norm
+    parameters_1 = [torch.nn.Parameter(torch.rand(4, 16)) for _ in range(10)]
+    parameters_2 = [torch.nn.Parameter(torch.rand(4, 16)) for _ in range(10)]
+    
+    loss = sum(p.sum() for p in parameters_1)
+    loss.backward()
+    
+    loss_2 = sum(p.sum() for p in parameters_2)
+    loss_2.backward()
+
+    # total_norm = compute_total_norm(parameters)
+    # print("Total norm: ", total_norm)
+    
+    # This will update the gradients in place.
+    print(gradient_clipping(parameters_1, 1.0))
+    
+    print(torch.nn.utils.clip_grad_norm_(parameters_2, 1.0))
+    import ipdb; ipdb.set_trace()    
+
+    # Test and plot lr scheduler
+    t = np.arange(0, 1000)
+    lr_min = 0.0001
+    lr_max = 0.001
+    iters_warmup = 100
+    iters_cosine = 900
+    lr = [cosine_learning_rate_schedule(x, lr_min, lr_max, iters_warmup, iters_cosine) for x in t]
+    
+    fig, ax = plt.subplots(1, 1)
+    ax.plot(t, lr)
+    ax.grid(alpha=0.5)
+    plt.savefig("lr.png")
+    import ipdb; ipdb.set_trace()
+    
+    
     import einops
     B, T, V = 4, 16, 50257
     # logits = torch.randn((B, T, V))
