@@ -118,6 +118,22 @@ def get_batch(data, batch_size, context_length, device):
     return x, y
 
 
+def save_checkpoint(model, optimizer, iteration, out):
+    data = {
+        "model": model.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "iteration": iteration,
+    }
+    torch.save(data, out)
+
+
+def load_checkpoint(src, model, optimizer):
+    data = torch.load(src)
+    model.load_state_dict(data["model"])
+    optimizer.load_state_dict(data["optimizer"])
+    return data["iteration"]
+
+
 if __name__ == "__main__":
     
     # Test batching
