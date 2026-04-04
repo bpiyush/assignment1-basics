@@ -10,6 +10,7 @@ import math
 import cs336_basics.model as models
 from cs336_basics.tokenizer import Tokenizer
 import tqdm
+import time
 
 
 def cross_entropy(logits, targets):
@@ -248,6 +249,7 @@ if __name__ == "__main__":
     
     # Set env stuff
     device = "cuda:0"
+    torch.set_float32_matmul_precision('high')
     
     
     # Load data
@@ -324,24 +326,44 @@ if __name__ == "__main__":
     
     # Training loop
     print_update("Training loop")
-    n_iters = 100
+    n_iters = 50
     pbar = tqdm.tqdm(range(n_iters), desc="Training", bar_format="{l_bar}{bar:20}{r_bar}")
+    
+    # Can fix the token positions during training (to save time)
+    p = torch.arange(0, args.context_length, device=device)
+    p = einops.repeat(p, "t -> b t", b=args.batch_size)
+
     for i in pbar:
+        t0 = time.time()
+        
+        # Get batch
+        x, y = get_batch(data_train, args.batch_size, args.context_length, device, deterministic=False)
+
+        # Set gradient to 0
         optimizer.zero_grad()
         
-        x, y = get_batch(data_train, args.batch_size, args.context_length, device, deterministic=True)
-        p = torch.arange(0, x.shape[1], device=x.device, dtype=x.dtype)
-        p = einops.repeat(p, "t -> b t", b=x.shape[0])
-        logits = model(x, p)
-        loss = cross_entropy(
-            einops.rearrange(logits, "b t d -> (b t) d"),
-            einops.rearrange(y, "b t -> (b t)"),
-        )
+        # Forward pass
+        with torch.autocast(device_type=device, dtype=torch.bfloat16):
+            logits = model(x, p)
+            loss = cross_entropy(
+                einops.rearrange(logits, "b t d -> (b t) d"),
+                einops.rearrange(y, "b t -> (b t)"),
+            )
+        
+        # Backward pass (accumulate gradients)
         loss.backward()
         
+        # Update optimizer
         optimizer.step()
         
-        pbar.set_postfix({"step": i, "loss": np.round(loss.item(), 5)})
+        # Wait for the GPU to finish its work before computing the time
+        torch.cuda.synchronize()
+        t1 = time.time()
+        dt = (t1 - t0) * 1e3 # in milliseconds
+        
+        tokens_per_sec = (args.batch_size * args.context_length) / (t1 - t0)
+        
+        pbar.set_postfix({"step": i, "loss": np.round(loss.item(), 5), "dt": f"{dt:.2f} ms", "tps": f"{tokens_per_sec:.1f}"})
         
 
 
