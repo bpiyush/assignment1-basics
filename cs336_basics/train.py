@@ -220,6 +220,30 @@ def generate(model, token_ids, token_positions, max_new_tokens, endoftext_index,
     return x
 
 
+# helps estimate an arbitrarily accurate loss over either split using many batches
+@torch.no_grad()
+def estimate_loss():
+    out = {}
+    model.eval()
+    for split in ['train', 'valid']:
+        losses = torch.zeros(eval_iters)
+        for k in range(eval_iters):
+            x, y = get_batch(eval(f"data_{split}"), args.batch_size, args.context_length, device, deterministic=False)
+            
+            # Forward pass
+            with torch.autocast(device_type=device, dtype=forward_dtype):
+                logits = model(x, p)
+                loss = cross_entropy(
+                    einops.rearrange(logits, "b t d -> (b t) d"),
+                    einops.rearrange(y, "b t -> (b t)"),
+                )
+
+            losses[k] = loss.item()
+        out[split] = losses.mean()
+    model.train()
+    return out
+
+
 if __name__ == "__main__":
     DATA_ROOT = "/scratch/shared/beegfs/piyush/datasets/text_data"
     import argparse
@@ -244,9 +268,10 @@ if __name__ == "__main__":
     parser.add_argument("--theta", type=float, default=1e4)
     # Optim
     # Batch size is tuned to a single 46-48GB GPU (e.g., A6000 or A40).
-    parser.add_argument("--batch_size", type=int, default=16)
-    parser.add_argument("--lr_base", type=float, default=6e-4)
+    parser.add_argument("--batch_size", type=int, default=16*16)
+    parser.add_argument("--lr", type=float, default=6e-4)
     parser.add_argument("--debug", action="store_true")
+    parser.add_argument("--log_to_wandb", action="store_true")
     args = parser.parse_args()
     
     
@@ -256,7 +281,7 @@ if __name__ == "__main__":
     torch_compile = True
     forward_dtype = torch.bfloat16 # default: torch.float32
 
-    lr_base = args.lr_base
+    lr_base = args.lr
     lr_min = lr_base / 10. # From Chinchilla paper.
     lr_max = lr_base
     
@@ -266,6 +291,9 @@ if __name__ == "__main__":
         max_iters = 50
     iters_warmup = int(max_iters * 0.1)
     iters_cosine = int(max_iters * 0.8)
+    
+    eval_iters = 25 # Number of batches to evaluate on and average over.
+    eval_interval = 50 # Evaluate and log to W&B after this many iterations.
 
     torch.manual_seed(1337)
     torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
@@ -273,6 +301,32 @@ if __name__ == "__main__":
     
     torch.set_float32_matmul_precision(tf32_precision)
     
+    if args.log_to_wandb:
+        import wandb
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        run_name = f"train_gpt2_17M_{timestamp}"
+        wandb.init(project="cs336_basics", name=run_name, entity="bpiyush")
+        
+        # Save config to W&B (dict.update returns None; build a merged dict)
+        hparams = vars(args).copy()
+        hparams.update(
+            {
+                "total_tokens_to_process": total_tokens_to_process,
+                "max_iters": max_iters,
+                "iters_warmup": iters_warmup,
+                "iters_cosine": iters_cosine,
+                "eval_iters": eval_iters,
+                "eval_interval": eval_interval,
+            }
+        )
+        wandb.config.update(hparams)
+        
+        # Also, save a mapping of the run_name to the hyperparameters locally
+        save_dir = "./wandb_runs_hparams"
+        import json
+        os.makedirs(save_dir, exist_ok=True)
+        with open(os.path.join(save_dir, f"{run_name}.json"), "w") as f:
+            json.dump(hparams, f)
     
     # Load data
     print_update("Loading data", color='yellow')
@@ -359,15 +413,15 @@ if __name__ == "__main__":
         # 2.5. Use nice numbers (e.g., 50304 for vocab size) - not using it.
         # 2.6. hyperparameters (gradient clipping, lr scheduling). DONE.
         # 2.7. Weight decay should only apply to matrices (not biases) - not using it.
-        # 2.8. Gradient accumulation.
-        # 2.9. Use multiple GPUs with DDP.
+        # 2.8. TODO Gradient accumulation.
+        # 2.9. TODO Use multiple GPUs with DDP.
     # 3. TODO Add validation loss and perplexity.
     # 4. TODO Add logging to W&B
     # 5. TODO Add checkpointing
     
     # Training loop
     print_update("Training loop")
-    pbar = tqdm.tqdm(range(1, max_iters + 1), desc="Training", bar_format="{l_bar}{bar:20}{r_bar}")
+    pbar = tqdm.tqdm(range(max_iters), desc="Training", bar_format="{l_bar}{bar:20}{r_bar}")
     
     # Can fix the token positions during training (to save time)
     p = torch.arange(0, args.context_length, device=device)
@@ -375,7 +429,25 @@ if __name__ == "__main__":
 
     for i in pbar:
         t0 = time.time()
+
+        # Learning rate schedule
+        lr = cosine_learning_rate_schedule(i, lr_min, lr_max, iters_warmup, iters_cosine)
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = lr
         
+        # evaluate the loss on train/val sets
+        if i % eval_interval == 0:
+            # Time to evaluate the loss on train/val sets and log to W&B
+            losses = estimate_loss()
+            # print(f"step {i}: train loss {losses['train']:.4f}, valid loss {losses['valid']:.4f}")
+            if args.log_to_wandb:
+                wandb.log({
+                    "train/loss": losses['train'],
+                    "valid/loss": losses['valid'],
+                    "lr": lr,
+                    "iter": i,
+                })
+
         # Get batch
         x, y = get_batch(data_train, args.batch_size, args.context_length, device, deterministic=False)
 
@@ -395,11 +467,6 @@ if __name__ == "__main__":
         
         # Gradient clipping after backward pass
         norm = gradient_clipping(model.parameters(), max_norm=1.0)
-        
-        # Learning rate schedule
-        lr = cosine_learning_rate_schedule(i, lr_min, lr_max, iters_warmup, iters_cosine)
-        for param_group in optimizer.param_groups:
-            param_group['lr'] = lr
         
         # Update optimizer
         optimizer.step()
@@ -421,6 +488,8 @@ if __name__ == "__main__":
                 "lr": np.round(lr, 6),
             }
         )
+        
+        # Log to W&B
         
 
 
