@@ -106,7 +106,26 @@ def gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_norm: float,
     return total_norm
 
 
+def get_batch(data, batch_size, context_length, device):
+    ix = torch.randint(len(data) - context_length, (batch_size,))
+    x = torch.stack([torch.from_numpy((data[i:i+context_length]).astype(np.int64)) for i in ix])
+    y = torch.stack([torch.from_numpy((data[i+1:i+1+context_length]).astype(np.int64)) for i in ix])
+    if device == 'cuda':
+        # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
+        x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
+    else:
+        x, y = x.to(device), y.to(device)
+    return x, y
+
+
 if __name__ == "__main__":
+    
+    # Test batching
+    x, y = get_batch(np.arange(1000), 4, 8, device="cpu")
+    print(x.shape, y.shape)
+    print(x)
+    print(y)
+    import ipdb; ipdb.set_trace()
     
     # Test and plot compute_total_norm
     parameters_1 = [torch.nn.Parameter(torch.rand(4, 16)) for _ in range(10)]
