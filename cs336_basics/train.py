@@ -236,20 +236,42 @@ if __name__ == "__main__":
     )
     # Model
     parser.add_argument("--vocab_size", type=int, default=10257)
-    parser.add_argument("--context_length", type=int, default=1024)
-    parser.add_argument("--num_layers", type=int, default=12)
-    parser.add_argument("--num_heads", type=int, default=12)
-    parser.add_argument("--d_model", type=int, default=768)
-    parser.add_argument("--d_ff", type=int, default=2048)
+    parser.add_argument("--context_length", type=int, default=256)
+    parser.add_argument("--num_layers", type=int, default=4)
+    parser.add_argument("--num_heads", type=int, default=16)
+    parser.add_argument("--d_model", type=int, default=512)
+    parser.add_argument("--d_ff", type=int, default=1344)
     parser.add_argument("--theta", type=float, default=1e4)
     # Optim
-    parser.add_argument("--batch_size", type=int, default=12)
+    # Batch size is tuned to a single 46-48GB GPU (e.g., A6000 or A40).
+    parser.add_argument("--batch_size", type=int, default=16)
+    parser.add_argument("--lr_base", type=float, default=6e-4)
+    parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
     
     
     # Set env stuff
     device = "cuda:0"
-    torch.set_float32_matmul_precision('high')
+    tf32_precision = "high"
+    torch_compile = True
+    forward_dtype = torch.bfloat16 # default: torch.float32
+
+    lr_base = args.lr_base
+    lr_min = lr_base / 10. # From Chinchilla paper.
+    lr_max = lr_base
+    
+    total_tokens_to_process = 327680000
+    max_iters = total_tokens_to_process // (args.batch_size * args.context_length)
+    if args.debug:
+        max_iters = 50
+    iters_warmup = int(max_iters * 0.1)
+    iters_cosine = int(max_iters * 0.8)
+
+    torch.manual_seed(1337)
+    torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
+    torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
+    
+    torch.set_float32_matmul_precision(tf32_precision)
     
     
     # Load data
@@ -273,6 +295,13 @@ if __name__ == "__main__":
     )
     model = model.to(device)
     models.count_params(model)
+    
+    if torch_compile:
+        print("Compiling model with torch.compile")
+        t0 = time.time()
+        model = torch.compile(model) # requires PyTorch 2.0
+        t1 = time.time()
+        print(f"Model compiled in {t1 - t0:.2f} seconds")
     
     # Load tokenizer
     tokenizer = Tokenizer.from_file(filepath=args.tok_path, special_tokens=['<|endoftext|>'])
@@ -318,16 +347,27 @@ if __name__ == "__main__":
     
     
     # Define optimizer
-    optimizer = AdamW(model.parameters(), lr=6e-4, weight_decay=0.1, betas=(0.9, 0.95), eps=1e-8)
+    optimizer = AdamW(model.parameters(), lr=lr_base, weight_decay=0.1, betas=(0.9, 0.95), eps=1e-8)
     
     # TODO
     # 1. Overfit on a single (deterministic) batch: DONE.
-    
+    # 2. Optimizations
+        # 2.1. Use TF32 matrix multiplication: DONE.
+        # 2.2. Use mixed-precision training (forward pass in bfloat16, backward pass in float32). DONE.
+        # 2.3. torch.compile: DONE.
+        # 2.4. Flash attention - not using it.
+        # 2.5. Use nice numbers (e.g., 50304 for vocab size) - not using it.
+        # 2.6. hyperparameters (gradient clipping, lr scheduling). DONE.
+        # 2.7. Weight decay should only apply to matrices (not biases) - not using it.
+        # 2.8. Gradient accumulation.
+        # 2.9. Use multiple GPUs with DDP.
+    # 3. TODO Add validation loss and perplexity.
+    # 4. TODO Add logging to W&B
+    # 5. TODO Add checkpointing
     
     # Training loop
     print_update("Training loop")
-    n_iters = 50
-    pbar = tqdm.tqdm(range(n_iters), desc="Training", bar_format="{l_bar}{bar:20}{r_bar}")
+    pbar = tqdm.tqdm(range(1, max_iters + 1), desc="Training", bar_format="{l_bar}{bar:20}{r_bar}")
     
     # Can fix the token positions during training (to save time)
     p = torch.arange(0, args.context_length, device=device)
@@ -343,7 +383,7 @@ if __name__ == "__main__":
         optimizer.zero_grad()
         
         # Forward pass
-        with torch.autocast(device_type=device, dtype=torch.bfloat16):
+        with torch.autocast(device_type=device, dtype=forward_dtype):
             logits = model(x, p)
             loss = cross_entropy(
                 einops.rearrange(logits, "b t d -> (b t) d"),
@@ -352,6 +392,14 @@ if __name__ == "__main__":
         
         # Backward pass (accumulate gradients)
         loss.backward()
+        
+        # Gradient clipping after backward pass
+        norm = gradient_clipping(model.parameters(), max_norm=1.0)
+        
+        # Learning rate schedule
+        lr = cosine_learning_rate_schedule(i, lr_min, lr_max, iters_warmup, iters_cosine)
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = lr
         
         # Update optimizer
         optimizer.step()
@@ -363,7 +411,16 @@ if __name__ == "__main__":
         
         tokens_per_sec = (args.batch_size * args.context_length) / (t1 - t0)
         
-        pbar.set_postfix({"step": i, "loss": np.round(loss.item(), 5), "dt": f"{dt:.2f} ms", "tps": f"{tokens_per_sec:.1f}"})
+        pbar.set_postfix(
+            {
+                "step": i,
+                "loss": np.round(loss.item(), 5),
+                "dt": f"{dt:.2f} ms",
+                "t/s": f"{tokens_per_sec:.1f}",
+                "norm": np.round(norm, 5),
+                "lr": np.round(lr, 6),
+            }
+        )
         
 
 
