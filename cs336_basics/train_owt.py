@@ -11,6 +11,7 @@ import cs336_basics.model as models
 from cs336_basics.tokenizer import Tokenizer
 import tqdm
 import time
+import torch.distributed as dist
 
 
 def cross_entropy(logits, targets):
@@ -24,7 +25,8 @@ def cross_entropy(logits, targets):
     B, V = logits.shape
     logits_max = logits.max(dim=-1, keepdim=False).values # [B]
     logits_hat = logits[torch.arange(B), targets] # [B]
-    loss = ((logits_max - logits_hat) + torch.log(torch.exp(logits - logits_max[:, None]).sum(dim=-1))).mean()
+    # loss = ((logits_max - logits_hat) + torch.log(torch.exp(logits - logits_max[:, None]).sum(dim=-1))).mean()
+    loss = (torch.logsumexp(logits, dim=-1) - logits_hat).mean()
     return loss
 
 
@@ -155,6 +157,8 @@ def get_terminal_width():
 
 
 def print_update(update, fillchar=".", color="yellow", pos="left", **kwargs):
+    if not master_process:
+        return
     from termcolor import colored
     # add ::: to the beginning and end of the update s.t. the total length of the
     # update spans the whole terminal
@@ -285,8 +289,32 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     
+    # Setup DDP
+    ddp = int(os.environ.get("RANK", -1)) != -1 # True only if DDP is enabled (via torchrun)
+    if ddp:
+        assert torch.cuda.is_available(), "CUDA is not available"
+        dist.init_process_group(backend="nccl")
+        
+        ddp_rank = int(os.environ['RANK'])
+        ddp_world_size = int(os.environ['WORLD_SIZE'])
+        ddp_local_rank = int(os.environ['LOCAL_RANK'])
+        
+        device = f"cuda:{ddp_local_rank}"
+        torch.cuda.set_device(device)
+        
+        master_process = ddp_rank == 0
+    else:
+        # Non-DDP run
+        device = "cuda:0"
+        torch.cuda.set_device(device)
+        ddp_rank = 0
+        ddp_world_size = 1
+        ddp_local_rank = 0
+        master_process = True
+    
+    
     # Set env stuff
-    device = "cuda:0"
+    # device = "cuda:0"
     tf32_precision = "high"
     torch_compile = True
     forward_dtype = torch.bfloat16 # default: torch.float32
@@ -298,21 +326,24 @@ if __name__ == "__main__":
     # Tokens to process in a single step: closest nice number to 0.25M
     # (0.25M = 250,000); closest power of 2: 262,144
     tokens_per_step = 262144
-    assert tokens_per_step % (args.context_length * args.batch_size) == 0, \
-        f"context_length * batch_size must be a divisor of tokens_per_step "\
+    assert tokens_per_step % (args.context_length * args.batch_size * ddp_world_size) == 0, \
+        f"context_length * batch_size * world_size must be a divisor of tokens_per_step "\
         f"(tokens_per_step = {tokens_per_step}\n"\
         f"context_length = {args.context_length}\n"\
-        f"batch_size = {args.batch_size})"
+        f"batch_size = {args.batch_size}\n"\
+        f"world_size = {ddp_world_size})"
     # This is number of sequences you can process on a single GPU at once.
     batch_size_micro = args.batch_size
-    grad_accum_steps = tokens_per_step // (batch_size_micro * args.context_length)
-    print(f"Batch size micro: {batch_size_micro}")
-    print(f"Grad accum steps: {grad_accum_steps}")
+    grad_accum_steps = tokens_per_step // (batch_size_micro * args.context_length * ddp_world_size)
+    if master_process:
+        print(f"Batch size micro: {batch_size_micro}")
+        print(f"Grad accum steps: {grad_accum_steps}")
+        print(f"World size: {ddp_world_size}")
 
     # Total tokens in OWT train set: 2,727,181,568
     # Closest power of 2: 2,684,354,560
     total_tokens_to_process = 2684354560
-    max_iters = total_tokens_to_process // (args.batch_size * args.context_length * grad_accum_steps)
+    max_iters = total_tokens_to_process // (args.batch_size * args.context_length * grad_accum_steps * ddp_world_size)
     if args.debug:
         max_iters = 50
     iters_warmup = int(max_iters * 0.1)
@@ -322,6 +353,8 @@ if __name__ == "__main__":
     eval_interval = 50 # Evaluate and log to W&B after this many iterations.
 
     torch.manual_seed(1337)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(1337)
     torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
     torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
     
@@ -331,7 +364,7 @@ if __name__ == "__main__":
     run_name = f"train_gpt2_17M_owt_{timestamp}"
     out_dir = f"/work/piyush/experiments/cs336/assignment1/{run_name}"
     os.makedirs(out_dir, exist_ok=True)
-    if args.log_to_wandb:
+    if args.log_to_wandb and master_process:
         import wandb
         wandb.init(project="cs336_basics", name=run_name, entity="bpiyush")
         
@@ -358,15 +391,18 @@ if __name__ == "__main__":
             json.dump(hparams, f)
     
     # Load data
-    print_update("Loading data", color='yellow')
+    if master_process:
+        print_update("Loading data", color='yellow')
     data_train = np.load(args.train_data, mmap_mode='r')
     data_valid = np.load(args.valid_data, mmap_mode='r')
-    print(f"Number of train tokens: {len(data_train)/1e9:.2f} B")
-    print(f"Number of valid tokens: {len(data_valid)/1e9:.2f} B")
+    if master_process:
+        print(f"Number of train tokens: {len(data_train)/1e9:.2f} B")
+        print(f"Number of valid tokens: {len(data_valid)/1e9:.2f} B")
     
     
     # Define model
-    print_update("Loading model", color='yellow')
+    if master_process:
+        print_update("Loading model", color='yellow')
     model = models.Transformer(
         vocab_size=args.vocab_size,
         context_length=args.context_length,
@@ -380,14 +416,21 @@ if __name__ == "__main__":
         use_rope=not args.no_rope,
     )
     model = model.to(device)
-    models.count_params(model)
+    if master_process:
+        models.count_params(model)
+    
+    if ddp:
+        raw_model = model
+        # import torch.nn.parallel.DistributedDataParallel as DDP
+        from torch.nn.parallel import DistributedDataParallel as DDP
+        model = DDP(model, device_ids=[ddp_local_rank])
     
     if torch_compile:
-        print("Compiling model with torch.compile")
+        # print("Compiling model with torch.compile")
         t0 = time.time()
         model = torch.compile(model) # requires PyTorch 2.0
         t1 = time.time()
-        print(f"Model compiled in {t1 - t0:.2f} seconds")
+        # print(f"Model compiled in {t1 - t0:.2f} seconds")
     
     # Load tokenizer
     tokenizer = Tokenizer.from_file(filepath=args.tok_path, special_tokens=['<|endoftext|>'])
@@ -452,8 +495,9 @@ if __name__ == "__main__":
     # 5. TODO Add checkpointing
     
     # Training loop
-    print_update("Training loop")
-    pbar = tqdm.tqdm(range(max_iters), desc="Training", bar_format="{l_bar}{bar:20}{r_bar}")
+    if master_process:
+        print_update("Training loop")
+    pbar = tqdm.tqdm(range(max_iters), desc="Training", bar_format="{l_bar}{bar:20}{r_bar}", disable=not master_process)
     
     # Can fix the token positions during training (to save time)
     p = torch.arange(0, args.context_length, device=device)
@@ -474,7 +518,7 @@ if __name__ == "__main__":
             # Time to evaluate the loss on train/val sets and log to W&B
             losses = estimate_loss()
             # print(f"step {i}: train loss {losses['train']:.4f}, valid loss {losses['valid']:.4f}")
-            if args.log_to_wandb:
+            if args.log_to_wandb and master_process:
                 wandb.log({
                     "train/loss": losses['train'],
                     "valid/loss": losses['valid'],
@@ -483,10 +527,13 @@ if __name__ == "__main__":
                 })
             
             # Save best model if validation loss is lower
-            if losses['valid'] < best_val_loss and not args.no_save:
+            if losses['valid'] < best_val_loss and not args.no_save and master_process:
                 print(f"Saving checkpoint with validation loss ({losses['valid']:.4f}) at step {i}:")
                 best_val_loss = losses['valid']
                 save_checkpoint(model, optimizer, i, f"{out_dir}/best_model.pth")
+        
+        # Set gradient to 0
+        optimizer.zero_grad()
 
         # Accumulate gradients for grad_accum_steps
         loss_accum = 0.0
@@ -494,9 +541,6 @@ if __name__ == "__main__":
 
             # Get batch
             x, y = get_batch(data_train, args.batch_size, args.context_length, device, deterministic=False)
-
-            # Set gradient to 0
-            optimizer.zero_grad()
             
             # Forward pass
             with torch.autocast(device_type=device, dtype=forward_dtype):
@@ -508,10 +552,18 @@ if __name__ == "__main__":
             
             # Important: Scale the loss by 1/grad_accum_steps
             loss = loss / grad_accum_steps
-            loss_accum += loss.item()
+            loss_accum += loss.detach()
+            
+            # We do not want to sync gradients for each micro-batch; only for the macro-batch.
+            if ddp:
+                model.require_backward_grad_sync = (j == grad_accum_steps - 1)
             
             # Backward pass (accumulate gradients)
             loss.backward()
+        
+        # For loss_accum, we want to avg. across all processes and not just master process.
+        if ddp:
+            dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
         
         # Gradient clipping after backward pass
         norm = gradient_clipping(model.parameters(), max_norm=1.0)
@@ -524,12 +576,12 @@ if __name__ == "__main__":
         t1 = time.time()
         dt = (t1 - t0) * 1e3 # in milliseconds
         
-        tokens_per_sec = (args.batch_size * args.context_length * grad_accum_steps) / (t1 - t0)
+        tokens_per_sec = (args.batch_size * args.context_length * grad_accum_steps * ddp_world_size) / (t1 - t0)
         
         pbar.set_postfix(
             {
                 "step": i,
-                "loss": np.round(loss_accum, 5),
+                "loss": np.round(loss_accum.item(), 5),
                 "dt": f"{dt:.2f} ms",
                 "t/s": f"{tokens_per_sec:.1f}",
                 "norm": np.round(norm, 5),
@@ -537,7 +589,6 @@ if __name__ == "__main__":
             }
         )
         
-        # Log to W&B
-        
 
-
+    if ddp:
+        dist.destroy_process_group()
