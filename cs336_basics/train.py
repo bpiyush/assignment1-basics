@@ -269,7 +269,7 @@ if __name__ == "__main__":
     # Optim
     # Batch size is tuned to a single 46-48GB GPU (e.g., A6000 or A40).
     parser.add_argument("--batch_size", type=int, default=16*16)
-    parser.add_argument("--lr", type=float, default=6e-4)
+    parser.add_argument("--lr", type=float, default=0.004)
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--log_to_wandb", action="store_true")
     args = parser.parse_args()
