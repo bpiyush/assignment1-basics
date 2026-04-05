@@ -25,8 +25,8 @@ def generate_samples(prompt="Hello! I am a language model ", n_samples=5):
         endoftext_index=tokenizer.encode(tokenizer.special_tokens[0])[0],
         context_length=args.context_length,
         softmax_temp=1.,
-        # top_p=0.7,
-        top_p=None,
+        top_p=0.95,
+        # top_p=None,
     )
     print("\n--------------------------------\n".join([tokenizer.decode(o.tolist()) for o in output]))
     return output
@@ -86,25 +86,5 @@ if __name__ == "__main__":
     # prompt = "Once upon a time, there was a pretty girl named"
     # prompt = "Hello! I am a language model"
     prompt = "This is a story about Sam Altman."
-    generate_samples(prompt=prompt, n_samples=5)
-
-    # print_update("Generating sample text")
-    # prompt = "Hello! I am a language model "
-    # token_ids = torch.tensor(tokenizer.encode(prompt))
-    # token_ids = einops.repeat(token_ids, "t -> b t", b=5)
-    # token_positions = torch.arange(0, token_ids.shape[1], device=token_ids.device)
-    # token_positions = einops.repeat(token_positions, "t -> b t", b=token_ids.shape[0])
-    # output = generate(
-    #     model,
-    #     token_ids,
-    #     token_positions,
-    #     max_new_tokens=64,
-    #     endoftext_index=tokenizer.encode(tokenizer.special_tokens[0])[0],
-    #     context_length=args.context_length,
-    #     softmax_temp=1.,
-    #     top_p=0.7,
-    # )
-    # print("\n\n".join([tokenizer.decode(o.tolist()) for o in output]))
-    
-    
+    generate_samples(prompt=prompt, n_samples=5)    
     import ipdb; ipdb.set_trace()

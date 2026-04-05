@@ -207,10 +207,11 @@ def generate(model, token_ids, token_positions, max_new_tokens, endoftext_index,
             indices = torch.argmax((Q_sorted.values.cumsum(dim=-1) >= top_p).int(), dim=-1)
             x_next = []
             for b in range(B):
-                token_indices_subset = Q_sorted.indices[b, :indices[b]]
+                token_indices_subset = Q_sorted.indices[b, :indices[b]+1]
                 Q_subset = Q[b, token_indices_subset]
-                Q_subset = models.softmax(Q_subset, dim=-1)
-                x_next.append(torch.multinomial(Q_subset, num_samples=1))
+                Q_subset = Q_subset / Q_subset.sum()
+                sampled_pos = torch.multinomial(Q_subset, num_samples=1)
+                x_next.append(token_indices_subset[sampled_pos])
             x_next = torch.stack(x_next).to(x.device)
         p_next = torch.tensor([[T] for _ in range(B)], device=p.device, dtype=p.dtype)
         
