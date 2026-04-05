@@ -266,6 +266,9 @@ if __name__ == "__main__":
     parser.add_argument("--d_model", type=int, default=512)
     parser.add_argument("--d_ff", type=int, default=1344)
     parser.add_argument("--theta", type=float, default=1e4)
+    parser.add_argument("--layer_norm", type=str, default="pre", choices=["pre", "post", "none"])
+    parser.add_argument("--ffn_act", type=str, default="swiglu", choices=["swiglu", "silu"])
+    parser.add_argument("--no_rope", action="store_true")
     # Optim
     # Batch size is tuned to a single 46-48GB GPU (e.g., A6000 or A40).
     parser.add_argument("--batch_size", type=int, default=16*16)
@@ -346,6 +349,9 @@ if __name__ == "__main__":
         d_ff=args.d_ff,
         num_heads=args.num_heads,
         theta=args.theta,
+        layer_norm=args.layer_norm,
+        ffn_act=args.ffn_act,
+        use_rope=not args.no_rope,
     )
     model = model.to(device)
     models.count_params(model)

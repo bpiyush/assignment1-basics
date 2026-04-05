@@ -302,22 +302,55 @@ class CausalMultiHeadSelfAttention(nn.Module):
 
 
 class TransformerBlock(nn.Module):
-    def __init__(self, d_model, d_ff, num_heads, theta, max_seq_len):
+    def __init__(self, d_model, d_ff, num_heads, theta, max_seq_len, layer_norm="pre", use_rope=True, ffn_act="swiglu"):
         super().__init__()
 
-        self.cmhsa = CausalMultiHeadSelfAttention(d_model=d_model, num_heads=num_heads, use_rope=True, theta=theta, max_seq_len=max_seq_len)
-        self.ffn = FFNSwiGLU(d_model, d_ff)
-        self.rmsnorm1 = RMSNorm(d_model)
-        self.rmsnorm2 = RMSNorm(d_model)
+        self.cmhsa = CausalMultiHeadSelfAttention(
+            d_model=d_model,
+            num_heads=num_heads,
+            use_rope=use_rope,
+            theta=theta,
+            max_seq_len=max_seq_len,
+        )
+        
+        assert ffn_act in ["swiglu", "silu"]
+        self.ffn_act = ffn_act
+        if ffn_act == "swiglu":
+            self.ffn = FFNSwiGLU(d_model, d_ff)
+        elif ffn_act == "silu":
+            # Hard code the feedforward dimension for SiLU
+            d_ff = 4 * d_model
+            self.ffn = FFNSiLU(d_model, d_ff)
+        else:
+            raise ValueError(f"Invalid FFN activation: {ffn_act}")
+        
+        assert layer_norm in ["pre", "post", "none"]
+        self.layer_norm = layer_norm
+        if layer_norm == "none":
+            self.rmsnorm1 = torch.nn.Identity()
+            self.rmsnorm2 = torch.nn.Identity()
+        else:
+            self.rmsnorm1 = RMSNorm(d_model)
+            self.rmsnorm2 = RMSNorm(d_model)
 
     def forward(self, x, token_positions):
-        x = x + self.cmhsa(self.rmsnorm1(x), token_positions)
-        x = x + self.ffn(self.rmsnorm2(x))
+        
+        if self.layer_norm == "pre":
+            x = x + self.cmhsa(self.rmsnorm1(x), token_positions)
+            x = x + self.ffn(self.rmsnorm2(x))
+        elif self.layer_norm == "post":
+            x = self.rmsnorm1(x + self.cmhsa(x, token_positions))
+            x = self.rmsnorm2(x + self.ffn(x))
+        elif self.layer_norm == "none":
+            x = x + self.cmhsa(x, token_positions)
+            x = x + self.ffn(x)
+        else:
+            raise ValueError(f"Invalid layer norm: {self.layer_norm}")
         return x
 
 
 class Transformer(nn.Module):
-    def __init__(self, vocab_size, context_length, num_layers, d_model, d_ff, num_heads, theta):
+    def __init__(self, vocab_size, context_length, num_layers, d_model, d_ff, num_heads, theta, layer_norm="pre", ffn_act="swiglu", use_rope=True):
         super().__init__()
 
         self.vocab_size = vocab_size
@@ -326,7 +359,10 @@ class Transformer(nn.Module):
         self.d_model = d_model
         self.d_ff = d_ff
         self.num_heads = num_heads
-
+        self.layer_norm = layer_norm
+        self.ffn_act = ffn_act
+        self.use_rope = use_rope
+        
         # Embedding
         self.embedding = Embedding(vocab_size, d_model)
 
@@ -339,6 +375,9 @@ class Transformer(nn.Module):
                     num_heads=num_heads,
                     max_seq_len=context_length,
                     theta=theta,
+                    layer_norm=layer_norm,
+                    ffn_act=ffn_act,
+                    use_rope=use_rope,
                 ) for _ in range(num_layers)
             ]
         )
