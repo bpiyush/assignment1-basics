@@ -136,10 +136,15 @@ def save_checkpoint(model, optimizer, iteration, out):
     torch.save(data, out)
 
 
-def load_checkpoint(src, model, optimizer):
-    data = torch.load(src)
-    model.load_state_dict(data["model"])
-    optimizer.load_state_dict(data["optimizer"])
+def load_checkpoint(src, model, optimizer=None):
+    data = torch.load(src, weights_only=False)
+    
+    state_dict = {k.replace("_orig_mod.", ""):v for k, v in data["model"].items()}
+    msg = model.load_state_dict(state_dict)
+    print("Loaded checkpoint from ", src)
+    print(msg)
+    if optimizer is not None:
+        optimizer.load_state_dict(data["optimizer"])
     return data["iteration"]
 
 
@@ -304,10 +309,12 @@ if __name__ == "__main__":
     
     torch.set_float32_matmul_precision(tf32_precision)
     
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    run_name = f"train_gpt2_17M_{timestamp}"
+    out_dir = f"/work/piyush/experiments/cs336/assignment1/{run_name}"
+    os.makedirs(out_dir, exist_ok=True)
     if args.log_to_wandb:
         import wandb
-        timestamp = time.strftime("%Y%m%d_%H%M%S")
-        run_name = f"train_gpt2_17M_{timestamp}"
         wandb.init(project="cs336_basics", name=run_name, entity="bpiyush")
         
         # Save config to W&B (dict.update returns None; build a merged dict)
@@ -432,6 +439,8 @@ if __name__ == "__main__":
     # Can fix the token positions during training (to save time)
     p = torch.arange(0, args.context_length, device=device)
     p = einops.repeat(p, "t -> b t", b=args.batch_size)
+    
+    best_val_loss = float('inf')
 
     for i in pbar:
         t0 = time.time()
@@ -453,6 +462,12 @@ if __name__ == "__main__":
                     "lr": lr,
                     "iter": i,
                 })
+            
+            # Save best model if validation loss is lower
+            if losses['valid'] < best_val_loss:
+                print(f"Saving checkpoint with validation loss ({losses['valid']:.4f}) at step {i}:")
+                best_val_loss = losses['valid']
+                save_checkpoint(model, optimizer, i, f"{out_dir}/best_model.pth")
 
         # Get batch
         x, y = get_batch(data_train, args.batch_size, args.context_length, device, deterministic=False)
