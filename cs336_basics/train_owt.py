@@ -347,7 +347,7 @@ if __name__ == "__main__":
     if args.debug:
         max_iters = 50
     iters_warmup = int(max_iters * 0.1)
-    iters_cosine = int(max_iters * 0.8)
+    iters_cosine = int(max_iters * 0.9)
 
     eval_iters = 25 # Number of batches to evaluate on and average over.
     eval_interval = 50 # Evaluate and log to W&B after this many iterations.
