@@ -83,8 +83,8 @@ if __name__ == "__main__":
     tokenizer = Tokenizer.from_file(filepath=args.tok_path, special_tokens=['<|endoftext|>'])
     
     # Generate samples
-    # prompt = "Once upon a time, there was a pretty girl named"
-    # prompt = "Hello! I am a language model"
-    prompt = "This is a story about Sam Altman."
+    prompt = "Once upon a time, there was a pretty girl named"
+    prompt = "Hello! I am a language model"
+    # prompt = "This is a story about Sam Altman."
     generate_samples(prompt=prompt, n_samples=5)    
     import ipdb; ipdb.set_trace()
