@@ -281,11 +281,12 @@ if __name__ == "__main__":
     parser.add_argument("--no_rope", action="store_true")
     # Optim
     # Batch size is tuned to a single 46-48GB GPU (e.g., A6000 or A40).
-    parser.add_argument("--batch_size", type=int, default=256)
+    parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=0.004)
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--log_to_wandb", action="store_true")
     parser.add_argument("--no_save", action="store_true")
+    parser.add_argument("--tie_weights", action="store_true")
     args = parser.parse_args()
     
     
@@ -414,6 +415,7 @@ if __name__ == "__main__":
         layer_norm=args.layer_norm,
         ffn_act=args.ffn_act,
         use_rope=not args.no_rope,
+        tie_weights=args.tie_weights,
     )
     model = model.to(device)
     if master_process:

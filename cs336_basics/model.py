@@ -38,7 +38,7 @@ def count_params(module, trainable_only=False, verbose=True):
 
 
 class Linear(nn.Module):
-    def __init__(self, in_features, out_features, device=None, dtype=None):
+    def __init__(self, in_features, out_features, device=None, dtype=None, sigma_scale=1.0):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
@@ -46,7 +46,7 @@ class Linear(nn.Module):
         self.dtype = dtype
 
         # Define W matrix (with careful initialization)
-        sigma = np.sqrt(2 / (out_features + in_features))
+        sigma = sigma_scale * np.sqrt(2 / (out_features + in_features))
         data = nn.init.trunc_normal_(
             torch.empty(out_features, in_features, dtype=dtype, device=device), mean=0.0, std=sigma, a=-3 * sigma, b=3 * sigma,
         )
@@ -350,7 +350,7 @@ class TransformerBlock(nn.Module):
 
 
 class Transformer(nn.Module):
-    def __init__(self, vocab_size, context_length, num_layers, d_model, d_ff, num_heads, theta, layer_norm="pre", ffn_act="swiglu", use_rope=True):
+    def __init__(self, vocab_size, context_length, num_layers, d_model, d_ff, num_heads, theta, layer_norm="pre", ffn_act="swiglu", use_rope=True, tie_weights=False):
         super().__init__()
 
         self.vocab_size = vocab_size
@@ -362,6 +362,7 @@ class Transformer(nn.Module):
         self.layer_norm = layer_norm
         self.ffn_act = ffn_act
         self.use_rope = use_rope
+        self.tie_weights = tie_weights
         
         # Embedding
         self.embedding = Embedding(vocab_size, d_model)
@@ -384,9 +385,14 @@ class Transformer(nn.Module):
 
         # RMSNorm at the output
         self.rmsnorm_output = RMSNorm(d_model)
-
-        # Linear layer
-        self.lm_head = Linear(d_model, vocab_size)
+        
+        # Linear output layer
+        if self.tie_weights:
+            # Share the weights of the embedding and the language model head
+            self.lm_head = Linear(d_model, vocab_size, sigma_scale=0.5)
+            self.embedding.E = self.lm_head.W
+        else:
+            self.lm_head = Linear(d_model, vocab_size, sigma_scale=1.0)
         
     def forward(self, token_ids, token_positions):
         x = self.embedding(token_ids)
