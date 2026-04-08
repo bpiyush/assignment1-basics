@@ -102,7 +102,8 @@ class RMSNorm(nn.Module):
         x = x.to(torch.float32)
 
         rms = (((x ** 2).mean(dim=-1) + self.eps) ** -0.5)
-        rms = einops.repeat(rms, "b t -> b t d", d=self.d_model)
+        # rms = einops.repeat(rms, "b t -> b t d", d=self.d_model)
+        rms = einops.repeat(rms, "... t -> ... t d", d=self.d_model)
         result = rms * x * self.g 
 
         return result.to(in_dtype)
@@ -244,7 +245,7 @@ def scaled_dot_product_attention(q, k, v, mask=None):
 
 
 class CausalMultiHeadSelfAttention(nn.Module):
-    def __init__(self, d_model, num_heads, use_rope=False, max_seq_len=None, theta=None):
+    def __init__(self, d_model, num_heads, use_rope=False, max_seq_len=None, theta=None, qk_norm=False):
         super().__init__()
         assert d_model % num_heads == 0
         self.d_model = d_model
@@ -269,6 +270,11 @@ class CausalMultiHeadSelfAttention(nn.Module):
             self.rope = RotaryPositionalEmbedding(theta=theta, max_seq_len=max_seq_len, d_k=d_k)
         else:
             self.rope = None
+        
+        self.qk_norm = qk_norm
+        if qk_norm:
+            self.q_norm = RMSNorm(d_k)
+            self.k_norm = RMSNorm(d_k)
 
     def forward(self, x, token_positions=None):
         # x: [B, seq_len, d_model]
@@ -279,6 +285,11 @@ class CausalMultiHeadSelfAttention(nn.Module):
         q = einops.rearrange(q, "b t (h d) -> b h t d", h=self.num_heads, d=self.d_k)
         k = einops.rearrange(k, "b t (h d) -> b h t d", h=self.num_heads, d=self.d_k)
         v = einops.rearrange(v, "b t (h d) -> b h t d", h=self.num_heads, d=self.d_v)
+        
+        # Apply QK normalization
+        if self.qk_norm:
+            q = self.q_norm(q)
+            k = self.k_norm(k)
 
         # Apply RoPE
         if self.use_rope:
@@ -302,7 +313,7 @@ class CausalMultiHeadSelfAttention(nn.Module):
 
 
 class TransformerBlock(nn.Module):
-    def __init__(self, d_model, d_ff, num_heads, theta, max_seq_len, layer_norm="pre", use_rope=True, ffn_act="swiglu"):
+    def __init__(self, d_model, d_ff, num_heads, theta, max_seq_len, layer_norm="pre", use_rope=True, ffn_act="swiglu", qk_norm=False):
         super().__init__()
 
         self.cmhsa = CausalMultiHeadSelfAttention(
@@ -311,6 +322,7 @@ class TransformerBlock(nn.Module):
             use_rope=use_rope,
             theta=theta,
             max_seq_len=max_seq_len,
+            qk_norm=qk_norm,
         )
         
         assert ffn_act in ["swiglu", "silu"]
@@ -350,7 +362,7 @@ class TransformerBlock(nn.Module):
 
 
 class Transformer(nn.Module):
-    def __init__(self, vocab_size, context_length, num_layers, d_model, d_ff, num_heads, theta, layer_norm="pre", ffn_act="swiglu", use_rope=True, tie_weights=False, zero_init_residual=False):
+    def __init__(self, vocab_size, context_length, num_layers, d_model, d_ff, num_heads, theta, layer_norm="pre", ffn_act="swiglu", use_rope=True, tie_weights=False, zero_init_residual=False, qk_norm=False):
         super().__init__()
 
         self.vocab_size = vocab_size
@@ -363,6 +375,7 @@ class Transformer(nn.Module):
         self.ffn_act = ffn_act
         self.use_rope = use_rope
         self.tie_weights = tie_weights
+        self.qk_norm = qk_norm
         
         # Embedding
         self.embedding = Embedding(vocab_size, d_model)
@@ -379,6 +392,7 @@ class Transformer(nn.Module):
                     layer_norm=layer_norm,
                     ffn_act=ffn_act,
                     use_rope=use_rope,
+                    qk_norm=qk_norm,
                 ) for _ in range(num_layers)
             ]
         )

@@ -289,6 +289,7 @@ if __name__ == "__main__":
     parser.add_argument("--tie_weights", action="store_true")
     parser.add_argument("--zero_init_residual", action="store_true")
     parser.add_argument("--use_muon", action="store_true")
+    parser.add_argument("--qk_norm", action="store_true")
     args = parser.parse_args()
     
     
@@ -419,6 +420,7 @@ if __name__ == "__main__":
         use_rope=not args.no_rope,
         tie_weights=args.tie_weights,
         zero_init_residual=args.zero_init_residual,
+        qk_norm=args.qk_norm,
     )
     model = model.to(device)
     if master_process:
@@ -546,7 +548,7 @@ if __name__ == "__main__":
                 })
             
             # Save best model if validation loss is lower
-            if losses['valid'] < best_val_loss and not args.no_save and master_process:
+            if losses['valid'] < best_val_loss and not args.no_save and master_process and i > 0:
                 print(f"Saving checkpoint with validation loss ({losses['valid']:.4f}) at step {i}:")
                 best_val_loss = losses['valid']
                 save_checkpoint(model, optimizer, i, f"{out_dir}/best_model.pth")
