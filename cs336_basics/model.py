@@ -350,7 +350,7 @@ class TransformerBlock(nn.Module):
 
 
 class Transformer(nn.Module):
-    def __init__(self, vocab_size, context_length, num_layers, d_model, d_ff, num_heads, theta, layer_norm="pre", ffn_act="swiglu", use_rope=True, tie_weights=False):
+    def __init__(self, vocab_size, context_length, num_layers, d_model, d_ff, num_heads, theta, layer_norm="pre", ffn_act="swiglu", use_rope=True, tie_weights=False, zero_init_residual=False):
         super().__init__()
 
         self.vocab_size = vocab_size
@@ -382,6 +382,13 @@ class Transformer(nn.Module):
                 ) for _ in range(num_layers)
             ]
         )
+        
+        if zero_init_residual:
+            # Zero out the output projection matrices in each layer s.t.
+            # the residual connection is zeroed out
+            for block in self.blocks:
+                block.cmhsa.WO.W.data.zero_()
+                block.ffn.W2.W.data.zero_()
 
         # RMSNorm at the output
         self.rmsnorm_output = RMSNorm(d_model)

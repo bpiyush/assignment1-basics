@@ -287,6 +287,8 @@ if __name__ == "__main__":
     parser.add_argument("--log_to_wandb", action="store_true")
     parser.add_argument("--no_save", action="store_true")
     parser.add_argument("--tie_weights", action="store_true")
+    parser.add_argument("--zero_init_residual", action="store_true")
+    parser.add_argument("--use_muon", action="store_true")
     args = parser.parse_args()
     
     
@@ -416,6 +418,7 @@ if __name__ == "__main__":
         ffn_act=args.ffn_act,
         use_rope=not args.no_rope,
         tie_weights=args.tie_weights,
+        zero_init_residual=args.zero_init_residual,
     )
     model = model.to(device)
     if master_process:
@@ -478,7 +481,21 @@ if __name__ == "__main__":
     
     
     # Define optimizer
-    optimizer = AdamW(model.parameters(), lr=lr_base, weight_decay=0.1, betas=(0.9, 0.95), eps=1e-8)
+    if not args.use_muon:
+        optimizer = AdamW(model.parameters(), lr=lr_base, weight_decay=0.1, betas=(0.9, 0.95), eps=1e-8)
+    else:
+        from cs336_basics.muon import MuonWithAuxAdam
+        check_name = lambda name: "embedding" in name or "lm_head" in name
+        hidden_weights = [p for name, p in raw_model.named_parameters() if not check_name(name) and p.ndim >= 2]
+        hidden_gains_biases = [p for name, p in raw_model.named_parameters() if not check_name(name) and p.ndim < 2]
+        nonhidden_params = [*raw_model.lm_head.parameters(), *raw_model.embedding.parameters()]
+        param_groups = [
+            dict(params=hidden_weights, use_muon=True,
+                lr=0.02, weight_decay=0.01),
+            dict(params=hidden_gains_biases+nonhidden_params, use_muon=False,
+                lr=3e-4, betas=(0.9, 0.95), weight_decay=0.01),
+        ]
+        optimizer = MuonWithAuxAdam(param_groups)
     
     # TODO
     # 1. Overfit on a single (deterministic) batch: DONE.
